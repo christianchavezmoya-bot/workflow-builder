@@ -54,8 +54,7 @@ import {
  * WORKFLOW BUILDER
  * - Create steps with editable title/description
  * - Override description for report
- * - Only show in report toggle
- * - Hide step from exported report toggle
+ * - Toggle description inclusion in final report
  * - Attach media (images/videos), choose from library, capture camera
  * - Decision pathways (up to 20) that branch to other steps
  * - User inputs (action prompts) per step
@@ -108,8 +107,7 @@ import {
  *  description: string;
  *  overrideInReport: boolean;
  *  overrideReportText: string;
- *  onlyShowInReport: boolean;
- *  hideFromExportedReport: boolean;
+ *  includeDescriptionInReport: boolean;
  *  mediaIds: string[];
  *  decisionsEnabled: boolean;
  *  decisions: Decision[];
@@ -151,8 +149,7 @@ const DEFAULT_WORKFLOW = /** @type {Workflow} */ ({
       description: "Capture evidence of TTHC, THA, & SWI - where applicable.",
       overrideInReport: false,
       overrideReportText: "",
-      onlyShowInReport: false,
-      hideFromExportedReport: false,
+      includeDescriptionInReport: true,
       mediaIds: [],
       decisionsEnabled: false,
       decisions: [],
@@ -173,6 +170,15 @@ function deepCopy(obj) {
 function normalizeOrders(steps) {
   const sorted = [...steps].sort((a, b) => a.order - b.order);
   return sorted.map((s, idx) => ({ ...s, order: idx + 1 }));
+}
+
+function enforceSequentialNextSteps(steps) {
+  const sorted = [...steps].sort((a, b) => a.order - b.order);
+  for (let i = 0; i < sorted.length; i += 1) {
+    const next = sorted[i + 1] || null;
+    sorted[i].nextStepId = next ? next.id : null;
+  }
+  return sorted;
 }
 
 function stepLabel(step) {
@@ -259,7 +265,7 @@ export default function WorkflowBuilderApp() {
     setWorkflow((prev) => {
       const next = patchFn(deepCopy(prev));
       // ensure stable sorts
-      next.steps = normalizeOrders(next.steps);
+      next.steps = enforceSequentialNextSteps(normalizeOrders(next.steps));
       return next;
     });
   }
@@ -273,8 +279,7 @@ export default function WorkflowBuilderApp() {
         description: "",
         overrideInReport: false,
         overrideReportText: "",
-        onlyShowInReport: false,
-        hideFromExportedReport: false,
+        includeDescriptionInReport: true,
         mediaIds: [],
         decisionsEnabled: false,
         decisions: [],
@@ -529,8 +534,8 @@ export default function WorkflowBuilderApp() {
           description: s.description ?? "",
           overrideInReport: !!s.overrideInReport,
           overrideReportText: s.overrideReportText ?? "",
-          onlyShowInReport: !!s.onlyShowInReport,
-          hideFromExportedReport: !!s.hideFromExportedReport,
+          includeDescriptionInReport:
+            typeof s.includeDescriptionInReport === "boolean" ? s.includeDescriptionInReport : true,
           mediaIds: Array.isArray(s.mediaIds) ? s.mediaIds : [],
           decisionsEnabled: !!s.decisionsEnabled,
           decisions: Array.isArray(s.decisions)
@@ -561,10 +566,8 @@ export default function WorkflowBuilderApp() {
   // ----------------------
 
   const reportSteps = useMemo(() => {
-    // For report preview: include steps that are not hidden from export; if a step is "only show in report"
-    // it still appears in preview (but may be treated specially in runtime).
     const sorted = [...workflow.steps].sort((a, b) => a.order - b.order);
-    return sorted.filter((s) => !s.hideFromExportedReport);
+    return sorted;
   }, [workflow.steps]);
 
   // ----------------------
@@ -573,7 +576,7 @@ export default function WorkflowBuilderApp() {
 
   return (
     <TooltipProvider>
-      <div className="min-h-screen w-full bg-zinc-950 text-zinc-100">
+      <div className="min-h-screen w-full text-zinc-100">
         <div className="mx-auto max-w-7xl px-4 py-6">
           <Header
             workflow={workflow}
@@ -584,7 +587,7 @@ export default function WorkflowBuilderApp() {
 
           <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-12">
             {/* Left: Step list */}
-            <div className="lg:col-span-4">
+            <div className="lg:col-span-3">
               <StepList
                 workflow={workflow}
                 stepsSorted={stepsSorted}
@@ -598,8 +601,8 @@ export default function WorkflowBuilderApp() {
               />
             </div>
 
-            {/* Right: Editor */}
-            <div className="lg:col-span-8">
+            {/* Middle: Editor */}
+            <div className="lg:col-span-5">
               <AnimatePresence mode="wait">
                 {selectedStep ? (
                   <motion.div
@@ -648,6 +651,15 @@ export default function WorkflowBuilderApp() {
                   </motion.div>
                 )}
               </AnimatePresence>
+            </div>
+
+            {/* Right: Worker preview */}
+            <div className="lg:col-span-4">
+              <WorkflowPreview
+                workflow={workflow}
+                stepsSorted={stepsSorted}
+                mediaIndex={mediaIndex}
+              />
             </div>
           </div>
 
@@ -799,19 +811,9 @@ function StepList({
                         Unlinked
                       </Badge>
                     ) : null}
-                    {s.onlyShowInReport ? (
-                      <Badge variant="secondary" className="bg-sky-500/15 text-sky-200">
-                        Report-only
-                      </Badge>
-                    ) : null}
-                    {s.hideFromExportedReport ? (
-                      <Badge variant="secondary" className="bg-rose-500/15 text-rose-200">
-                        Hidden
-                      </Badge>
-                    ) : null}
                   </div>
                   <div className="mt-1 line-clamp-1 text-xs text-zinc-400">
-                    {(s.overrideInReport ? s.overrideReportText : s.description) || ""}
+                    {s.description || ""}
                   </div>
                 </div>
 
@@ -945,6 +947,23 @@ function StepEditor({
   onUpdateInput,
   onDeleteInput,
 }) {
+  const [reportOnlyView, setReportOnlyView] = useState(false);
+  const linkingBoundsRef = useRef(null);
+
+  useEffect(() => {
+    setReportOnlyView(step.overrideInReport && step.includeDescriptionInReport === false);
+  }, [step.id, step.overrideInReport, step.includeDescriptionInReport]);
+
+  function toggleDescriptionView() {
+    const next = !reportOnlyView;
+    setReportOnlyView(next);
+    if (next) {
+      onChange({ overrideInReport: true, includeDescriptionInReport: false });
+    } else {
+      onChange({ overrideInReport: false, includeDescriptionInReport: true });
+    }
+  }
+
   return (
     <Card className="border-zinc-800 bg-zinc-900/40">
       <CardHeader className="space-y-1">
@@ -963,7 +982,7 @@ function StepEditor({
       </CardHeader>
 
       <CardContent>
-        <div className="grid grid-cols-1 gap-4">
+        <div ref={linkingBoundsRef} className="grid grid-cols-1 gap-4">
           {/* Title */}
           <Field label="Title">
             <Input
@@ -974,96 +993,100 @@ function StepEditor({
             />
           </Field>
 
-          {/* Description */}
+                    {/* Description */}
           <Field
             label={
-              <span className="inline-flex items-center gap-2">
-                Description
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span>Description</span>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Info className="h-4 w-4 text-zinc-400" />
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-sm">
+                      Runtime instructions shown to the user.
+                    </TooltipContent>
+                  </Tooltip>
+                  <span className="text-xs text-zinc-400">Flip to edit the report-only version.</span>
+                </div>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Info className="h-4 w-4 text-zinc-400" />
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="bg-zinc-900/60 ring-1 ring-zinc-800 hover:bg-zinc-900"
+                      onClick={toggleDescriptionView}
+                    >
+                      {reportOnlyView ? "report only" : "user and report view"}
+                    </Button>
                   </TooltipTrigger>
                   <TooltipContent className="max-w-sm">
-                    Runtime instructions shown to the user (unless this step is report-only).
+                    Toggles between the user-facing description and the report-only description. Report-only
+                    disables the user description in the final report and uses the back-side text instead.
                   </TooltipContent>
                 </Tooltip>
-              </span>
+              </div>
             }
           >
-            <Textarea
-              value={step.description}
-              onChange={(e) => onChange({ description: e.target.value })}
-              className="min-h-[110px] border-zinc-800 bg-zinc-950/30"
-              placeholder="Describe the action to perform…"
-            />
-          </Field>
 
-          {/* Report overrides & visibility */}
-          <div className="grid grid-cols-1 gap-3 rounded-2xl border border-zinc-800 bg-zinc-950/20 p-3">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="text-sm font-medium">Override description in final report</div>
-                <div className="text-xs text-zinc-400">
-                  If enabled, the report will use the alternative text instead of the runtime description.
+            <div className="wf-flip">
+              <div className={`wf-flip-inner${reportOnlyView ? " is-flipped" : ""}`}>
+                <div className="wf-flip-face wf-flip-front">
+                  <Textarea
+                    value={step.description}
+                    onChange={(e) => onChange({ description: e.target.value })}
+                    className="min-h-[110px] border-zinc-800 bg-zinc-950/30 wf-flip-textarea"
+                    placeholder="Describe the action to perform…"
+                  />
+                </div>
+                <div className="wf-flip-face wf-flip-back">
+                  <Textarea
+                    value={step.overrideReportText}
+                    onChange={(e) => onChange({ overrideReportText: e.target.value })}
+                    className="min-h-[110px] border-zinc-800 bg-zinc-950/30 wf-flip-textarea"
+                    placeholder="Report-only description…"
+                  />
                 </div>
               </div>
-              <Switch checked={step.overrideInReport} onCheckedChange={(v) => onChange({ overrideInReport: v })} />
             </div>
-
-            {step.overrideInReport ? (
-              <Textarea
-                value={step.overrideReportText}
-                onChange={(e) => onChange({ overrideReportText: e.target.value })}
-                className="min-h-[90px] border-zinc-800 bg-zinc-950/30"
-                placeholder="Alternative report text…"
-              />
-            ) : null}
-
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <ToggleRow
-                title="Only show in report"
-                description="Hide from runtime workflow UI; include only in report output."
-                checked={step.onlyShowInReport}
-                onCheckedChange={(v) => onChange({ onlyShowInReport: v })}
-              />
-              <ToggleRow
-                title="Hide step from exported report"
-                description="Exclude this step from the exported report entirely."
-                checked={step.hideFromExportedReport}
-                onCheckedChange={(v) => onChange({ hideFromExportedReport: v })}
-              />
-            </div>
-          </div>
+          </Field>
 
           {/* Linking */}
           <div className="grid grid-cols-1 gap-3 rounded-2xl border border-zinc-800 bg-zinc-950/20 p-3">
-            <div className="flex items-center justify-between">
-              <div>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2">
                 <div className="text-sm font-medium">Default Next step</div>
-                <div className="text-xs text-zinc-400">
-                  Used when the user completes this step without choosing a decision button.
-                </div>
+                <ArrowLeftRight className="h-4 w-4 text-zinc-400" />
+                <motion.div
+                  drag
+                  dragConstraints={linkingBoundsRef}
+                  dragMomentum={false}
+                  className="cursor-move"
+                >
+                  <Select
+                    value={step.nextStepId || "__none"}
+                    onValueChange={(v) => onChange({ nextStepId: v === "__none" ? null : v })}
+                  >
+                    <SelectTrigger className="min-w-[160px] max-w-[220px] border-zinc-800 bg-zinc-950/30">
+                      <SelectValue placeholder="Choose next step" />
+                    </SelectTrigger>
+                    <SelectContent className="border-zinc-800 bg-zinc-950 text-zinc-100">
+                      <SelectItem value="__none">(No default next step)</SelectItem>
+                      {stepsSorted
+                        .filter((s) => s.id !== step.id)
+                        .map((s) => (
+                          <SelectItem key={s.id} value={s.id}>
+                            {stepLabel(s)}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </motion.div>
               </div>
-              <ArrowLeftRight className="h-4 w-4 text-zinc-400" />
+              <div className="text-xs text-zinc-400">
+                Used when the user completes this step without choosing a decision button.
+              </div>
             </div>
-            <Select
-              value={step.nextStepId || "__none"}
-              onValueChange={(v) => onChange({ nextStepId: v === "__none" ? null : v })}
-            >
-              <SelectTrigger className="border-zinc-800 bg-zinc-950/30">
-                <SelectValue placeholder="Choose next step" />
-              </SelectTrigger>
-              <SelectContent className="border-zinc-800 bg-zinc-950 text-zinc-100">
-                <SelectItem value="__none">(No default next step)</SelectItem>
-                {stepsSorted
-                  .filter((s) => s.id !== step.id)
-                  .map((s) => (
-                    <SelectItem key={s.id} value={s.id}>
-                      {stepLabel(s)}
-                    </SelectItem>
-                  ))}
-              </SelectContent>
-            </Select>
           </div>
 
           {/* Tabs */}
@@ -1543,6 +1566,226 @@ function InputsSection({ step, onAddInput, onUpdateInput, onDeleteInput }) {
 }
 
 // ----------------------
+// Worker Preview
+// ----------------------
+
+function WorkflowPreview({ workflow, stepsSorted, mediaIndex }) {
+  const [currentStepId, setCurrentStepId] = useState(() => stepsSorted[0]?.id || null);
+  const [history, setHistory] = useState([]);
+
+  useEffect(() => {
+    const first = stepsSorted[0]?.id || null;
+    if (!currentStepId || !workflow.steps.some((s) => s.id === currentStepId)) {
+      setCurrentStepId(first);
+      setHistory([]);
+    }
+  }, [workflow.steps, stepsSorted, currentStepId]);
+
+  const step = stepsSorted.find((s) => s.id === currentStepId) || null;
+
+  function goTo(stepId) {
+    if (!stepId) return;
+    setHistory((prev) => (currentStepId ? [...prev, currentStepId] : prev));
+    setCurrentStepId(stepId);
+  }
+
+  function goBack() {
+    setHistory((prev) => {
+      if (!prev.length) return prev;
+      const nextHistory = prev.slice(0, -1);
+      const last = prev[prev.length - 1];
+      setCurrentStepId(last);
+      return nextHistory;
+    });
+  }
+
+  function goStart() {
+    setHistory([]);
+    setCurrentStepId(stepsSorted[0]?.id || null);
+  }
+
+  return (
+    <Card className="border-zinc-800 bg-zinc-900/40">
+      <CardHeader className="space-y-1">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base">Worker Preview</CardTitle>
+          <Badge variant="secondary" className="bg-zinc-800/60 text-zinc-200">
+            Preview
+          </Badge>
+        </div>
+        <div className="text-xs text-zinc-400">
+          Simulated technician view. Use buttons to navigate the workflow.
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {!step ? (
+          <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-950/20 p-6 text-center text-sm text-zinc-400">
+            No steps available.
+          </div>
+        ) : (
+          <>
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium">
+                    {String(step.order).padStart(2, "0")} · {step.title || "(Untitled step)"}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {step.decisionsEnabled ? (
+                    <Badge variant="secondary" className="bg-indigo-500/15 text-indigo-200">
+                      Branching
+                    </Badge>
+                  ) : null}
+                </div>
+              </div>
+
+              {step.description ? (
+                <div className="mt-2 text-sm text-zinc-200">{step.description}</div>
+              ) : null}
+            </div>
+
+            {(step.mediaIds || []).length > 0 ? (
+              <div className="space-y-2">
+                <div className="text-xs font-medium text-zinc-400">Attached media</div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {step.mediaIds
+                    .map((id) => mediaIndex.get(id))
+                    .filter(Boolean)
+                    .map((m) => (
+                      <div key={m.id} className="rounded-2xl border border-zinc-800 bg-zinc-950/20 p-2">
+                        <div className="aspect-video overflow-hidden rounded-xl bg-zinc-900">
+                          {m.type === "image" ? (
+                            <img src={m.url} alt={m.name} className="h-full w-full object-cover" />
+                          ) : (
+                            <video src={m.url} className="h-full w-full object-cover" controls />
+                          )}
+                        </div>
+                        <div className="mt-2 truncate text-xs text-zinc-300">{m.name}</div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            ) : null}
+
+            {(step.inputs || []).length > 0 ? (
+              <div className="space-y-2">
+                <div className="text-xs font-medium text-zinc-400">Inputs</div>
+                <div className="space-y-2">
+                  {step.inputs.map((inp) => (
+                    <div key={inp.id} className="rounded-2xl border border-zinc-800 bg-zinc-950/20 p-3">
+                      <div className="flex items-center justify-between">
+                        <div className="text-xs text-zinc-400">{inp.label || "Input"}</div>
+                        <Badge variant="secondary" className="bg-zinc-800/60 text-zinc-200">
+                          {String(inp.type).toUpperCase()}
+                        </Badge>
+                      </div>
+                      <div className="mt-2">
+                        {inp.type === "text" || inp.type === "number" ? (
+                          <Input
+                            disabled
+                            placeholder={inp.type === "number" ? "Enter a number" : "Enter text"}
+                            className="border-zinc-800 bg-zinc-950/30"
+                          />
+                        ) : inp.type === "note" ? (
+                          <Textarea
+                            disabled
+                            placeholder="Enter notes"
+                            className="border-zinc-800 bg-zinc-950/30"
+                          />
+                        ) : inp.type === "checkbox" ? (
+                          <div className="flex items-center gap-2">
+                            <Switch disabled />
+                            <span className="text-xs text-zinc-400">Unchecked</span>
+                          </div>
+                        ) : inp.type === "choice" ? (
+                          <div className="flex flex-wrap gap-2">
+                            {(inp.options || []).length === 0 ? (
+                              <span className="text-xs text-zinc-500">No options set</span>
+                            ) : (
+                              inp.options.map((opt, idx) => (
+                                <Badge key={`${inp.id}_${idx}`} variant="secondary" className="bg-zinc-800/60 text-zinc-200">
+                                  {opt}
+                                </Badge>
+                              ))
+                            )}
+                          </div>
+                        ) : inp.type === "photo" ? (
+                          <Button disabled className="bg-zinc-900/60 ring-1 ring-zinc-800">
+                            <ImageIcon className="mr-2 h-4 w-4" />
+                            Capture photo
+                          </Button>
+                        ) : inp.type === "video" ? (
+                          <Button disabled className="bg-zinc-900/60 ring-1 ring-zinc-800">
+                            <Video className="mr-2 h-4 w-4" />
+                            Capture video
+                          </Button>
+                        ) : inp.type === "signature" ? (
+                          <Button disabled className="bg-zinc-900/60 ring-1 ring-zinc-800">
+                            <Pencil className="mr-2 h-4 w-4" />
+                            Capture signature
+                          </Button>
+                        ) : (
+                          <div className="text-xs text-zinc-500">Unsupported input type</div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {step.decisionsEnabled && (step.decisions || []).length > 0 ? (
+              <div className="space-y-2">
+                <div className="text-xs font-medium text-zinc-400">Decision buttons</div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {step.decisions.map((d) => (
+                    <Button
+                      key={d.id}
+                      className="bg-indigo-600 hover:bg-indigo-500"
+                      disabled={!d.targetStepId}
+                      onClick={() => goTo(d.targetStepId)}
+                    >
+                      {d.label || "Decision"}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="secondary"
+                className="bg-zinc-900/60 ring-1 ring-zinc-800 hover:bg-zinc-900"
+                onClick={goBack}
+                disabled={history.length === 0}
+              >
+                Back
+              </Button>
+              <Button
+                className="bg-emerald-600 hover:bg-emerald-500"
+                onClick={() => goTo(step.nextStepId)}
+                disabled={!step.nextStepId}
+              >
+                Next step
+              </Button>
+              <Button
+                variant="secondary"
+                className="bg-zinc-900/60 ring-1 ring-zinc-800 hover:bg-zinc-900"
+                onClick={goStart}
+                disabled={!stepsSorted.length}
+              >
+                Start over
+              </Button>
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ----------------------
 // Report Preview
 // ----------------------
 
@@ -1556,16 +1799,18 @@ function ReportPreview({ workflowName, reportSteps }) {
             {reportSteps.length} steps
           </Badge>
         </div>
-        <div className="text-xs text-zinc-400">
-          Preview of what would appear in the exported report (excludes “Hide from exported report”).
-        </div>
+        <div className="text-xs text-zinc-400">Preview of what would appear in the exported report.</div>
       </CardHeader>
       <CardContent>
         <div className="rounded-2xl border border-zinc-800 bg-zinc-950/20 p-4">
           <div className="text-sm font-semibold">{workflowName || "Workflow"} — Final Report</div>
           <div className="mt-3 space-y-3">
             {reportSteps.map((s) => {
-              const desc = s.overrideInReport ? s.overrideReportText : s.description;
+              const desc = s.overrideInReport
+                ? s.overrideReportText
+                : s.includeDescriptionInReport
+                  ? s.description
+                  : "";
               return (
                 <div key={s.id} className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-3">
                   <div className="flex items-start justify-between gap-3">
@@ -1573,19 +1818,11 @@ function ReportPreview({ workflowName, reportSteps }) {
                       <div className="text-sm font-medium">
                         {String(s.order).padStart(2, "0")} · {s.title || "(Untitled step)"}
                       </div>
-                      {s.onlyShowInReport ? (
-                        <div className="mt-1 text-xs text-sky-200">This is report-only content.</div>
-                      ) : null}
                     </div>
                     <div className="flex items-center gap-2">
                       {s.overrideInReport ? (
                         <Badge variant="secondary" className="bg-indigo-500/15 text-indigo-200">
                           Override
-                        </Badge>
-                      ) : null}
-                      {s.hideFromExportedReport ? (
-                        <Badge variant="secondary" className="bg-rose-500/15 text-rose-200">
-                          Hidden
                         </Badge>
                       ) : null}
                     </div>
@@ -1613,20 +1850,6 @@ function Field({ label, children }) {
     <div>
       <Label className="text-xs text-zinc-400">{label}</Label>
       <div className="mt-1">{children}</div>
-    </div>
-  );
-}
-
-function ToggleRow({ title, description, checked, onCheckedChange }) {
-  return (
-    <div className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="text-sm font-medium">{title}</div>
-          <div className="mt-1 text-xs text-zinc-400">{description}</div>
-        </div>
-        <Switch checked={checked} onCheckedChange={onCheckedChange} />
-      </div>
     </div>
   );
 }
@@ -1692,3 +1915,9 @@ function FooterNotes() {
     </div>
   );
 }
+
+
+
+
+
+
